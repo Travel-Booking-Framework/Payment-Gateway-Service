@@ -1,13 +1,16 @@
 import graphene
-from PaymentGateway.models import PaymentGateway, PaymentTransaction
+import grpc
+import json
+from kafka import KafkaProducer
+from PaymentGateway.models import PaymentTransaction
 from graphene_django import DjangoObjectType
+from generated import payment_callback_pb2, payment_callback_pb2_grpc  # Import gRPC files
 
-
-class PaymentGatewayType(DjangoObjectType):
-    class Meta:
-        model = PaymentGateway
-        fields = '__all__'
-
+# Kafka Configuration
+producer = KafkaProducer(
+    bootstrap_servers='localhost:9092',  # Update based on your Kafka setup
+    value_serializer=lambda v: json.dumps(v).encode('utf-8')
+)
 
 class PaymentTransactionType(DjangoObjectType):
     class Meta:
@@ -16,32 +19,71 @@ class PaymentTransactionType(DjangoObjectType):
 
 
 class PaymentGatewayOperation(graphene.ObjectType):
-    # GraphQL field for creating a PaymentGateway record.
-    create_payment_gateway = graphene.Field(
-        PaymentGatewayType,
-        gateway_name=graphene.String(required=True),
-        api_url=graphene.String(required=True),
-        merchant_id=graphene.String(required=True),
-        API_key=graphene.String(required=True),
-        active=graphene.Boolean(required=False, default_value=True)
+    process_payment = graphene.Field(
+        PaymentTransactionType,
+        transaction_id=graphene.ID(required=True),
+        wallet_uuid=graphene.String(required=True),
+        amount=graphene.Float(required=True),
     )
 
-    # GraphQL field for updating a PaymentGateway record.
-    update_payment_gateway = graphene.Field(
-        PaymentGatewayType,
-        id=graphene.ID(required=True),
-        gateway_name=graphene.String(),
-        api_url=graphene.String(),
-        merchant_id=graphene.String(),
-        API_key=graphene.String(),
-        active=graphene.Boolean()
-    )
+    def resolve_process_payment(self, info, transaction_id, wallet_uuid, amount):
+        """
+        Simulates a bank payment, then:
+        - Calls Wallet Microservice via gRPC
+        - Publishes a Kafka event
+        """
+        try:
+            # Simulating bank payment success (replace with actual API call)
+            payment_successful = True  
 
-    def resolve_create_payment_gateway(self, info, gateway_name, api_url, merchant_id, API_key, active):
-        # TODO: Implement the logic to create a new PaymentGateway record.
-        pass
+            if payment_successful:
+                # Update transaction status in DB
+                transaction = PaymentTransaction.objects.get(id=transaction_id)
+                transaction.status = "completed"
+                transaction.save()
 
-    def resolve_update_payment_gateway(self, info, id, gateway_name=None, api_url=None, merchant_id=None, API_key=None,
-                                       active=None):
-        # TODO: Implement the logic to update an existing PaymentGateway record.
-        pass
+                #  Call Wallet Microservice via gRPC
+                self.send_payment_callback(transaction_id, wallet_uuid, amount)
+
+                #  Publish Kafka Event
+                event = {
+                    "transaction_id": transaction_id,
+                    "wallet_uuid": wallet_uuid,
+                    "amount": amount,
+                    "status": "completed"
+                }
+                producer.send('payment_wallet', event)
+                producer.flush()
+
+                return transaction
+            else:
+                raise Exception("Payment failed.")
+
+        except Exception as e:
+            raise Exception(f"Payment processing failed: {e}")
+
+    def send_payment_callback(self, transaction_id, wallet_uuid, amount):
+        """
+        Calls Wallet Microservice via gRPC after successful payment.
+        """
+        try:
+            # Connect to Wallet Microservice
+            channel = grpc.insecure_channel('wallet_service:50053')  # Update to match your service
+            stub = payment_callback_pb2_grpc.PaymentCallbackStub(channel)
+
+            # Send gRPC request
+            response = stub.ProcessPaymentCallback(
+                payment_callback_pb2.PaymentCallbackRequest(
+                    transaction_id=transaction_id,
+                    status="completed",
+                    transaction_type="credit",
+                    amount=amount,
+                    wallet_uuid=wallet_uuid
+                )
+            )
+
+            if response.status != "SUCCESS":
+                raise Exception(f"Wallet update failed: {response.message}")
+
+        except Exception as e:
+            raise Exception(f"gRPC request failed: {e}")
