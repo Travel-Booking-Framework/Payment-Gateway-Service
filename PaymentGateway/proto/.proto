@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package payment_callback;
+
+// Define the Payment Callback Request
+message PaymentCallbackRequest {
+  string transaction_id = 1;
+  string status = 2;  // "completed" or "failed"
+  string transaction_type = 3;  // "credit" or "debit"
+  float amount = 4;
+  string wallet_uuid = 5;
+}
+
+// Define the Payment Callback Response
+message TransactionResponse {
+  string status = 1;  // "SUCCESS" or "FAILED"
+  string message = 2;
+}
+
+// Define the gRPC service
+service PaymentCallback {
+  rpc ProcessPaymentCallback (PaymentCallbackRequest) returns (TransactionResponse);
+}
